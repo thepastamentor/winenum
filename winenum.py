@@ -749,7 +749,7 @@ class WinEnum:
     # ==================== BloodHound Collection ====================
     
     def collect_bloodhound(self) -> ServiceResult:
-        """Collect BloodHound data"""
+        """Collect BloodHound data with rusthound + rusthound-ce"""
         result = ServiceResult(service='bloodhound', port=389)
         
         if 389 not in self.open_ports and 636 not in self.open_ports:
@@ -761,14 +761,18 @@ class WinEnum:
         result.open = True
         self.print_header("BLOODHOUND COLLECTION")
         
+        # Run rusthound (legacy BH) with failover to bloodhound-python
         self.print_status("Attempting collection with RustHound (+ADCS)...", "info")
         if self._collect_rusthound(result):
             result.cred_access = True
-            return result
+        else:
+            self.print_status("RustHound failed, trying BloodHound.py...", "warning")
+            if self._collect_bloodhound_py(result):
+                result.cred_access = True
         
-        self.print_status("RustHound failed, trying BloodHound.py...", "warning")
-        if self._collect_bloodhound_py(result):
-            result.cred_access = True
+        # Run rusthound-ce (BloodHound CE) independently - no failover
+        self.print_status("Attempting collection with RustHound-CE...", "info")
+        self._collect_rusthound_ce(result)
         
         return result
     
@@ -808,6 +812,39 @@ class WinEnum:
             self.print_status(f"RustHound error: {stderr}", "error")
         return False
     
+    def _collect_rusthound_ce(self, result: ServiceResult) -> bool:
+        """Collect using rusthound-ce for BloodHound Community Edition"""
+        bh_ce_dir = os.path.join(self.output_dir, 'bloodhound-ce')
+        os.makedirs(bh_ce_dir, exist_ok=True)
+        
+        if self.target.hash:
+            self.print_status("RustHound-CE doesn't support hash auth", "info")
+            return False
+        
+        cmd = ['rusthound-ce',
+               '-d', self.target.domain,
+               '-i', self.target.ip,
+               '-u', f'{self.target.username}@{self.target.domain}',
+               '-p', self.target.password,
+               '-o', bh_ce_dir,
+               '-z']
+        
+        code, stdout, stderr = self.run_command(cmd, timeout=180)
+        
+        if code == 0:
+            zip_files = glob.glob(f'{bh_ce_dir}/*.zip')
+            if zip_files:
+                self.print_status(f"BloodHound CE data collected!", "finding")
+                result.details['bloodhound_ce_zip'] = zip_files[0]
+                self.print_status(f"  → {zip_files[0]}", "success")
+                return True
+        
+        if code == -2:
+            self.print_status("rusthound-ce not found, skipping CE collection", "warning")
+        elif self.verbose:
+            self.print_status(f"RustHound-CE error: {stderr}", "error")
+        return False
+    
     def _collect_bloodhound_py(self, result: ServiceResult) -> bool:
         """Collect using bloodhound-python"""
         bh_dir = os.path.join(self.output_dir, 'bloodhound')
@@ -843,6 +880,78 @@ class WinEnum:
         
         self.print_status("BloodHound collection failed", "error")
         return False
+    
+    # ==================== Certipy ADCS ====================
+    
+    def enum_certipy(self) -> ServiceResult:
+        """Enumerate ADCS with certipy-ad (failover to certipy)"""
+        result = ServiceResult(service='certipy', port=389)
+        
+        if 389 not in self.open_ports and 636 not in self.open_ports:
+            return result
+        
+        if not self.target.has_creds() or not self.target.domain:
+            return result
+        
+        result.open = True
+        self.print_header("ADCS ENUMERATION (CERTIPY)")
+        
+        certipy_dir = os.path.join(self.output_dir, 'certipy')
+        os.makedirs(certipy_dir, exist_ok=True)
+        
+        user_string = f'{self.target.username}@{self.target.domain}'
+        original_dir = os.getcwd()
+        
+        # Try certipy-ad first, then certipy
+        for tool in ['certipy-ad', 'certipy']:
+            cmd = [tool, 'find',
+                   '-u', user_string,
+                   '-dc-ip', self.target.ip,
+                   '-vulnerable', '-enabled',
+                   '-output', 'certipy']
+            
+            if self.target.hash:
+                cmd.extend(['-hashes', f':{self.target.hash}'])
+            else:
+                cmd.extend(['-p', self.target.password])
+            
+            # chdir so certipy writes output files into the certipy dir
+            os.chdir(certipy_dir)
+            code, stdout, stderr = self.run_command(cmd, timeout=120)
+            os.chdir(original_dir)
+            
+            if code == -2:  # Command not found
+                if tool == 'certipy-ad':
+                    self.print_status(f"{tool} not found, trying certipy...", "warning")
+                    continue
+                else:
+                    self.print_status("Neither certipy-ad nor certipy found", "warning")
+                    return result
+            
+            if code == 0:
+                result.cred_access = True
+                
+                # Check for vulnerable templates
+                if 'ESC' in stdout:
+                    vuln_templates = re.findall(r'(ESC\d+)', stdout)
+                    if vuln_templates:
+                        result.details['vulnerable_templates'] = list(set(vuln_templates))
+                        self.print_status(f"Vulnerable templates found: {', '.join(set(vuln_templates))}", "finding")
+                
+                # List output files
+                cert_files = glob.glob(f'{certipy_dir}/certipy*')
+                if cert_files:
+                    result.details['certipy_output'] = cert_files
+                    for f in cert_files:
+                        self.print_status(f"  \u2192 {f}", "success")
+                else:
+                    self.print_status("ADCS enumeration complete (no vulnerable templates)", "info")
+            else:
+                self.print_status(f"Certipy failed: {stderr[:200] if stderr else 'unknown error'}", "error")
+            
+            break  # Don't try fallback if first tool ran (even if it failed)
+        
+        return result
     
     # ==================== WinRM Enumeration ====================
     
@@ -926,8 +1035,13 @@ class WinEnum:
         
         self.print_status("MSSQL service detected", "success")
         
+        auth_success = False
+        auth_cmd = None  # Store the working auth command for xp_cmdshell test
+        
         if self.target.has_creds():
             self.print_status("Skipping default cred tests (creds provided)")
+            
+            # Test domain auth
             cmd = ['netexec', 'mssql', self.target.ip]
             cmd.extend(self.target.netexec_auth())
             
@@ -935,11 +1049,33 @@ class WinEnum:
             
             if '[+]' in stdout:
                 if 'Pwn3d!' in stdout or 'admin' in stdout.lower():
-                    self.print_status("MSSQL ADMIN access!", "finding")
+                    self.print_status("MSSQL ADMIN access (domain auth)!", "finding")
                     result.details['is_admin'] = True
                 else:
-                    self.print_status("MSSQL authentication successful", "success")
+                    self.print_status("MSSQL domain auth successful", "success")
                 result.cred_access = True
+                auth_success = True
+                auth_cmd = cmd[:]
+            
+            # Also test local auth
+            self.print_status("Testing MSSQL with local auth...", "info")
+            cmd_local = ['netexec', 'mssql', self.target.ip, '--local-auth']
+            cmd_local.extend(self.target.netexec_auth())
+            
+            code, stdout, stderr = self.run_command(cmd_local)
+            
+            if '[+]' in stdout:
+                if 'Pwn3d!' in stdout or 'admin' in stdout.lower():
+                    self.print_status("MSSQL ADMIN access (local auth)!", "finding")
+                    result.details['is_admin'] = True
+                    result.details['local_auth'] = True
+                else:
+                    self.print_status("MSSQL local auth successful", "success")
+                    result.details['local_auth'] = True
+                result.cred_access = True
+                if not auth_success:
+                    auth_cmd = cmd_local[:]
+                    auth_success = True
         else:
             default_creds = [('sa', ''), ('sa', 'sa'), ('sa', 'password')]
             
@@ -951,7 +1087,29 @@ class WinEnum:
                     self.print_status(f"Default creds work: {user}:{passwd}", "finding")
                     result.details['default_creds'] = f"{user}:{passwd}"
                     result.anonymous_access = True
+                    auth_cmd = cmd[:]
+                    auth_success = True
                     break
+        
+        # Test xp_cmdshell if any auth worked
+        if auth_success and auth_cmd:
+            self.print_status("Testing xp_cmdshell...", "info")
+            xp_cmd = auth_cmd + ['-x', 'whoami']
+            code, stdout, stderr = self.run_command(xp_cmd, timeout=15)
+            
+            if code == 0 and stdout.strip() and '[+]' in stdout:
+                self.print_status("xp_cmdshell is ENABLED!", "finding")
+                result.details['xp_cmdshell'] = True
+                # Extract the whoami output
+                for line in stdout.split('\n'):
+                    line = line.strip()
+                    if '\\' in line and '[' not in line:
+                        result.details['xp_cmdshell_user'] = line
+                        self.print_status(f"  → Running as: {line}", "success")
+                        break
+            else:
+                result.details['xp_cmdshell'] = False
+                self.print_status("xp_cmdshell disabled or not accessible", "info")
         
         return result
     
@@ -1108,6 +1266,7 @@ class WinEnum:
         if self.target.has_creds() and self.target.domain:
             all_tasks['kerberoast'] = self.kerberoast
             all_tasks['bloodhound'] = self.collect_bloodhound
+            all_tasks['certipy'] = self.enum_certipy
         
         total = len(all_tasks)
         completed = [0]  # Mutable for thread-safe counter
@@ -1192,8 +1351,17 @@ class WinEnum:
                 findings.append(f"KERBEROAST: {len(result.details['kerberoast_hashes'])} service account(s)")
             if result.details.get('bloodhound_zip'):
                 findings.append(f"BLOODHOUND: Data collected")
+            if result.details.get('bloodhound_ce_zip'):
+                findings.append(f"BLOODHOUND CE: Data collected")
             if result.details.get('adcs_collected'):
                 findings.append(f"ADCS: Certificate data collected")
+            if result.details.get('vulnerable_templates'):
+                findings.append(f"CERTIPY: Vulnerable templates: {', '.join(result.details['vulnerable_templates'])}")
+            if result.details.get('xp_cmdshell'):
+                user = result.details.get('xp_cmdshell_user', 'unknown')
+                findings.append(f"MSSQL: xp_cmdshell ENABLED (running as {user})")
+            if result.details.get('local_auth'):
+                findings.append(f"MSSQL: Local auth works")
             if result.details.get('ldapdump_dir'):
                 findings.append(f"LDAP: Domain dumped to {result.details['ldapdump_dir']}")
         
@@ -1224,6 +1392,16 @@ class WinEnum:
             collected.append("ldapdump/ (HTML domain dump)")
         if os.path.exists(os.path.join(self.output_dir, 'bloodhound')):
             collected.append("bloodhound/ (import to BH GUI)")
+        if os.path.exists(os.path.join(self.output_dir, 'bloodhound-ce')):
+            collected.append("bloodhound-ce/ (import to BH CE)")
+        if os.path.exists(os.path.join(self.output_dir, 'certipy')):
+            collected.append("certipy/ (ADCS analysis)")
+        if os.path.exists(os.path.join(self.output_dir, 'krb5.conf')):
+            collected.append("krb5.conf (export KRB5_CONFIG=./winenum/krb5.conf)")
+        if os.path.exists(os.path.join(self.output_dir, 'hashes')):
+            collected.append("hashes (unified hash file)")
+        if os.path.exists(os.path.join(self.output_dir, 'cracked.txt')):
+            collected.append("cracked.txt (cracked passwords)")
         if os.path.exists(os.path.join(self.output_dir, 'zone_transfer.txt')):
             collected.append("zone_transfer.txt (DNS records)")
         
@@ -1234,6 +1412,68 @@ class WinEnum:
             print("  (none)")
         
         print()
+    
+    def generate_krb5_conf(self):
+        """Generate krb5.conf for Kerberos auth using netexec"""
+        if not self.target.has_creds() or not self.target.domain:
+            return
+        
+        if 88 not in self.open_ports:
+            return
+        
+        self.print_header("KRB5 CONFIGURATION")
+        
+        krb5_path = os.path.join(self.output_dir, 'krb5.conf')
+        
+        cmd = ['netexec', 'smb', self.target.ip]
+        cmd.extend(self.target.netexec_auth())
+        cmd.extend(['-k', '--generate-krb5-file', krb5_path])
+        
+        code, stdout, stderr = self.run_command(cmd, timeout=15)
+        
+        if os.path.exists(krb5_path):
+            os.environ['KRB5_CONFIG'] = krb5_path
+            self.print_status(f"krb5.conf saved to: {krb5_path}", "success")
+            self.print_status(f"Run: export KRB5_CONFIG={krb5_path}", "info")
+        else:
+            self.print_status("Failed to generate krb5.conf", "warning")
+
+
+    # ==================== Main Entry Point ====================
+    
+    def run(self):
+        """Run full enumeration"""
+        print_banner()
+        
+        start_time = time.time()
+        
+        print(f"\n{Colors.BOLD}Target:{Colors.END} {self.target.ip}")
+        if self.target.has_creds():
+            print(f"{Colors.BOLD}Credentials:{Colors.END} {self.target.cred_string()}")
+            if self.target.hash:
+                print(f"{Colors.BOLD}Auth:{Colors.END} NTLM Hash")
+        print(f"{Colors.BOLD}Threads:{Colors.END} {self.threads}")
+        print(f"{Colors.BOLD}Output:{Colors.END} {self.output_dir}")
+        print()
+        
+        self.scan_ports()
+        
+        if not self.open_ports:
+            self.print_status("No open ports found. Exiting.", "error")
+            return
+        
+        self.discover_domain()
+        
+        # Generate krb5.conf if Kerberos available
+        if 88 in self.open_ports and self.target.has_creds() and self.target.domain:
+            self.generate_krb5_conf()
+        
+        self.run_concurrent_enum()
+        
+        elapsed = time.time() - start_time
+        self.print_summary()
+        
+        self.print_status(f"Enumeration completed in {elapsed:.1f} seconds", "success")
     
     def export_json(self, filepath: str):
         """Export results to JSON"""
@@ -1262,37 +1502,6 @@ class WinEnum:
             json.dump(export_data, f, indent=2)
         
         self.print_status(f"Results exported to {filepath}", "success")
-    
-    # ==================== Main Entry Point ====================
-    
-    def run(self):
-        """Run full enumeration"""
-        print_banner()
-        
-        start_time = time.time()
-        
-        print(f"\n{Colors.BOLD}Target:{Colors.END} {self.target.ip}")
-        if self.target.has_creds():
-            print(f"{Colors.BOLD}Credentials:{Colors.END} {self.target.cred_string()}")
-            if self.target.hash:
-                print(f"{Colors.BOLD}Auth:{Colors.END} NTLM Hash")
-        print(f"{Colors.BOLD}Threads:{Colors.END} {self.threads}")
-        print(f"{Colors.BOLD}Output:{Colors.END} {self.output_dir}")
-        print()
-        
-        self.scan_ports()
-        
-        if not self.open_ports:
-            self.print_status("No open ports found. Exiting.", "error")
-            return
-        
-        self.discover_domain()
-        self.run_concurrent_enum()
-        
-        elapsed = time.time() - start_time
-        self.print_summary()
-        
-        self.print_status(f"Enumeration completed in {elapsed:.1f} seconds", "success")
 
 
 def main():
@@ -1357,3 +1566,4 @@ Examples:
 
 if __name__ == '__main__':
     main()
+

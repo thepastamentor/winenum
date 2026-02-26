@@ -6,18 +6,21 @@ Quick and dirty Windows/AD enumeration tool built for HTB and CTF boxes. Point i
 
 - **Port scan** — hits all the common Windows ports (SMB, LDAP, Kerberos, WinRM, RDP, MSSQL, DNS, HTTP, etc.)
 - **Domain discovery** — auto-detects the domain name from SMB/LDAP if you don't provide one
+- **krb5.conf** — auto-generates a krb5.conf and exports `KRB5_CONFIG` if Kerberos is available
 - **Service enumeration** — runs everything concurrently:
-  - **SMB** — tests auth, enumerates shares, spiders for interesting files (configs, scripts, certs, databases, etc.)
+  - **SMB** — tests auth, enumerates shares, spiders for interesting files
   - **LDAP** — tests anonymous bind, runs `ldapdomaindump` with creds
   - **Kerberos** — detects the service for later attacks
-  - **WinRM/RDP/MSSQL** — tests creds, checks for admin access
+  - **WinRM/RDP** — tests creds, checks for admin/shell access
+  - **MSSQL** — tests domain + local auth, checks for xp_cmdshell
   - **DNS** — attempts zone transfers
   - **HTTP** — grabs server headers
-- **RID brute** — enumerates domain users via RID cycling (tries guest → anonymous → NULL if no creds)
-- **AS-REP roasting** — finds users without pre-auth, also tests any users found during RID brute
+- **RID brute** — enumerates domain users via RID cycling
+- **AS-REP roasting** — finds users without pre-auth
 - **Kerberoasting** — requests TGS tickets for service accounts
-- **BloodHound collection** — tries RustHound first (with ADCS), falls back to bloodhound-python
-- **Auto-cracking** — once all hashes are collected, runs hashcat against `rockyou.txt` automatically
+- **BloodHound collection** — runs both `rusthound` (with ADCS + bloodhound-python failover) and `rusthound-ce` (for BloodHound CE)
+- **ADCS enumeration** — runs `certipy-ad` (or `certipy`) to find vulnerable certificate templates
+- **Auto-cracking** — collects all hashes, then runs hashcat against `rockyou.txt`
 
 If you provide credentials, it skips all the NULL/guest/anonymous junk and goes straight to authenticated enumeration. No point wasting time testing anonymous access when you already have a valid login.
 
@@ -30,6 +33,8 @@ Needs the usual pentest toolkit on your path:
 - `ldapsearch`
 - `impacket` (`impacket-GetNPUsers`, `impacket-GetUserSPNs`)
 - `rusthound` and/or `bloodhound-python`
+- `rusthound-ce` (BloodHound CE collection)
+- `certipy-ad` or `certipy` (ADCS enumeration)
 - `hashcat`
 - `ldapdomaindump`
 
@@ -83,29 +88,35 @@ winenum/
 ├── asrep_hashes.txt        # AS-REP hashes (hashcat -m 18200)
 ├── kerberoast_hashes.txt   # Kerberoast hashes (hashcat -m 13100)
 ├── cracked.txt             # Cracked passwords
+├── krb5.conf               # Kerberos config (export KRB5_CONFIG=./winenum/krb5.conf)
 ├── zone_transfer.txt       # DNS zone transfer results
 ├── ldapdump/               # ldapdomaindump HTML output
-└── bloodhound/             # BloodHound collection ZIP
+├── bloodhound/             # RustHound / bloodhound-python collection
+├── bloodhound-ce/          # RustHound-CE collection (BloodHound CE)
+└── certipy/                # Certipy ADCS analysis
 ```
 
 ## How It Runs
 
-Everything runs concurrently in a thread pool — service enumeration, RID brute, kerberoasting, AS-REP roasting, and BloodHound collection all fire at the same time. Once all tasks finish and hashes are collected, hashcat kicks in to crack them.
+Everything runs concurrently in a thread pool — service enumeration, RID brute, kerberoasting, AS-REP roasting, BloodHound collection, and certipy all fire at the same time. Once all tasks finish and hashes are collected, hashcat kicks in to crack them.
 
 You'll see live progress as tasks complete:
 
 ```
-[*] Launching 12 tasks concurrently...
-[+] [1/12] http ✓
-[+] [2/12] rdp ✓
-[+] [3/12] kerberos ✓
-[+] [4/12] winrm ✓
+[*] Launching 13 tasks concurrently...
+[+] [1/13] http ✓
+[+] [2/13] rdp ✓
+[+] [3/13] kerberos ✓
+[+] [4/13] winrm ✓
 [★] Found 2 Kerberoastable service account(s)!
-[+] [5/12] kerberoast ✓
-[+] [6/12] smb ✓
-[+] [7/12] mssql ✓
+[+] [5/13] kerberoast ✓
+[+] [6/13] smb ✓
+[+] [7/13] mssql ✓
+[★] xp_cmdshell is ENABLED!
+[★] Vulnerable templates found: ESC1, ESC8
+[+] [8/13] certipy ✓
 ...
-[+] [12/12] bloodhound ✓
+[+] [13/13] bloodhound ✓
 [*] Cracking AS-REP hashes (mode 18200)...
 [*] Cracking Kerberoast hashes (mode 13100)...
 [★] CRACKED: svc_sql:Summer2024!
@@ -113,6 +124,6 @@ You'll see live progress as tasks complete:
 
 ## Disclaimer
 
-Built for authorised security testing and CTF challenges only. Don't be stupid with it. 
+Built for authorised security testing and CTF challenges only. Don't be stupid with it.
 
-his has been built for commands/tools as I use them and if your applicaton/wordlist/etc placement is different those functions will not work and are not my problem.
+This has been built for commands/tools as I use them and if your applicaton/wordlist/etc placement is different those functions will not work and are not my problem.
