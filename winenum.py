@@ -15,7 +15,7 @@ import glob
 from dataclasses import dataclass, field
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock, Thread, Event
+from threading import Lock
 import time
 
 # ANSI colors
@@ -1022,11 +1022,6 @@ class WinEnum:
     
     def crack_hashes(self):
         """Attempt to crack collected hashes with hashcat and rockyou.txt"""
-        # Guard against duplicate runs (background thread + fallback)
-        if hasattr(self, '_crack_done'):
-            return
-        self._crack_done = True
-        
         hashes_file = os.path.join(self.output_dir, 'hashes')
         wordlist = '/usr/share/wordlists/rockyou.txt'
         cracked_file = os.path.join(self.output_dir, 'cracked.txt')
@@ -1086,17 +1081,6 @@ class WinEnum:
     
     # ==================== Concurrent Execution ====================
     
-    def _background_crack(self, stop_event):
-        """Background thread: polls for hashes file and cracks when found"""
-        hashes_file = os.path.join(self.output_dir, 'hashes')
-        
-        # Poll every 5 seconds until hashes appear or stop signalled
-        while not stop_event.is_set():
-            if os.path.exists(hashes_file) and os.path.getsize(hashes_file) > 0:
-                self.crack_hashes()
-                return
-            stop_event.wait(5)
-    
     def run_concurrent_enum(self):
         """Run ALL enumeration, attacks, and cracking concurrently"""
         
@@ -1130,11 +1114,6 @@ class WinEnum:
         
         self.print_status(f"Launching {total} tasks concurrently...\n", "info")
         
-        # Start background hash cracker - polls for hashes file
-        stop_crack = Event()
-        crack_thread = Thread(target=self._background_crack, args=(stop_crack,), daemon=True)
-        crack_thread.start()
-        
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
             futures = {executor.submit(func): name for name, func in all_tasks.items()}
             
@@ -1154,15 +1133,8 @@ class WinEnum:
                     if name != 'rid_brute':
                         self.results[name] = ServiceResult(service=name, port=0)
         
-        # All tasks done - if cracker hasn't started yet, run it now
-        stop_crack.set()
-        crack_thread.join(timeout=10)
-        
-        # Final crack attempt if background thread didn't get to it
-        hashes_file = os.path.join(self.output_dir, 'hashes')
-        if os.path.exists(hashes_file) and os.path.getsize(hashes_file) > 0:
-            if not hasattr(self, '_crack_done'):
-                self.crack_hashes()
+        # All tasks done - now crack any collected hashes
+        self.crack_hashes()
     
     # ==================== Summary Report ====================
     

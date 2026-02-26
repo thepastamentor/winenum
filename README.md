@@ -17,7 +17,7 @@ Quick and dirty Windows/AD enumeration tool built for HTB and CTF boxes. Point i
 - **AS-REP roasting** — finds users without pre-auth, also tests any users found during RID brute
 - **Kerberoasting** — requests TGS tickets for service accounts
 - **BloodHound collection** — tries RustHound first (with ADCS), falls back to bloodhound-python
-- **Auto-cracking** — dumps all hashes to a single file and runs hashcat against `rockyou.txt` in the background while other tasks are still running
+- **Auto-cracking** — once all hashes are collected, runs hashcat against `rockyou.txt` automatically
 
 If you provide credentials, it skips all the NULL/guest/anonymous junk and goes straight to authenticated enumeration. No point wasting time testing anonymous access when you already have a valid login.
 
@@ -90,7 +90,7 @@ winenum/
 
 ## How It Runs
 
-Everything runs concurrently in a thread pool — service enumeration, RID brute, kerberoasting, AS-REP roasting, and BloodHound collection all fire at the same time. A background thread watches for hashes and kicks off hashcat as soon as anything lands, so cracking starts while other tasks are still running.
+Everything runs concurrently in a thread pool — service enumeration, RID brute, kerberoasting, AS-REP roasting, and BloodHound collection all fire at the same time. Once all tasks finish and hashes are collected, hashcat kicks in to crack them.
 
 You'll see live progress as tasks complete:
 
@@ -102,14 +102,17 @@ You'll see live progress as tasks complete:
 [+] [4/12] winrm ✓
 [★] Found 2 Kerberoastable service account(s)!
 [+] [5/12] kerberoast ✓
-[*] Cracking Kerberoast hashes (mode 13100)...
 [+] [6/12] smb ✓
 [+] [7/12] mssql ✓
-[★] CRACKED: svc_sql:Summer2024!
 ...
+[+] [12/12] bloodhound ✓
+[*] Cracking AS-REP hashes (mode 18200)...
+[*] Cracking Kerberoast hashes (mode 13100)...
+[★] CRACKED: svc_sql:Summer2024!
 ```
 
 ## Disclaimer
 
-Built for authorised security testing and CTF challenges only. Don't be stupid with it.
-This has been built for commands/tools as I use them and if your applicaton/wordlist/etc placement is different those functions will not work and are not my problem.
+Built for authorised security testing and CTF challenges only. Don't be stupid with it. 
+
+his has been built for commands/tools as I use them and if your applicaton/wordlist/etc placement is different those functions will not work and are not my problem.
