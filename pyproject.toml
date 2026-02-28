@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "winenum"
+version = "0.1.0"
+description = "Automated enumeration of Windows services with credential testing"
+authors = [
+    { name = "VegeLasagne" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "rich>=13.0.0",
+    "requests>=2.28.0"
+]
+
+[project.scripts]
+winenum = "winenum.cli:main"

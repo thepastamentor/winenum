@@ -1,62 +1,61 @@
-# WinEnum
+# WinEnum (Rich Edition)
 
-Quick and dirty Windows/AD enumeration tool built for HTB and CTF boxes. Point it at an IP, optionally give it creds, and it'll rip through all the common services, grab what it can, and try to crack anything it finds.
+A high-speed, concurrent Windows/AD enumeration tool designed specifically for HackTheBox and CTFs. Feed it an IP (and optionally credentials), and it tears straight through all common services concurrently, extracting information, finding vulnerable cert templates, dumping hashes, and immediately throwing them into hashcat. 
 
-## What It Does
+Built to eliminate the boring part of AD environments so you can get straight to the blood.
 
-- **Port scan** — hits all the common Windows ports (SMB, LDAP, Kerberos, WinRM, RDP, MSSQL, DNS, HTTP, etc.)
-- **Domain discovery** — auto-detects the domain name from SMB/LDAP if you don't provide one
-- **krb5.conf** — auto-generates a krb5.conf and exports `KRB5_CONFIG` if Kerberos is available
-- **Service enumeration** — runs everything concurrently:
-  - **SMB** — tests auth, enumerates shares, spiders for interesting files
-  - **LDAP** — tests anonymous bind, runs `ldapdomaindump` with creds
-  - **Kerberos** — detects the service for later attacks
-  - **WinRM/RDP** — tests creds, checks for admin/shell access
-  - **MSSQL** — tests domain + local auth, checks for xp_cmdshell
-  - **DNS** — attempts zone transfers
-  - **HTTP** — grabs server headers
-- **RID brute** — enumerates domain users via RID cycling
-- **AS-REP roasting** — finds users without pre-auth
-- **Kerberoasting** — requests TGS tickets for service accounts
-- **BloodHound collection** — runs both `rusthound` (with ADCS + bloodhound-python failover) and `rusthound-ce` (for BloodHound CE)
-- **ADCS enumeration** — runs `certipy-ad` (or `certipy`) to find vulnerable certificate templates
-- **Auto-cracking** — collects all hashes, then runs hashcat against `rockyou.txt`
+## Features
 
-If you provide credentials, it skips all the NULL/guest/anonymous junk and goes straight to authenticated enumeration. No point wasting time testing anonymous access when you already have a valid login.
+- **Port scan fallback** — Hits common AD ports (SMB, LDAP, Kerberos, WinRM, RDP, MSSQL, DNS, HTTP). Uses Nmap if installed, falls back to Netcat if nmap fails.
+- **Auto-pilot Domain discovery** — Pulls the domain name natively from SMB or LDAP if you forget to provide it.
+- **Concurrent Execution** — Smashes out enumeration with a thread pool. No more waiting 5 minutes for `rusthound` before checking if `netexec` allows a NULL session. It all happens at once.
+- **Beautiful UI** — Powered by `rich`, progress bars track every individual service in real-time, popping high-value findings (like `ADMIN ACCESS` or `xp_cmdshell`) directly to the console above the progress bars.
+- **Auto-cracking** — Captures AS-REP and Kerberoast hashes simultaneously, concatenates them, and immediately launches `hashcat` to crack them while you read the summary report.
+- **BloodHound CE API** — Built-in support to upload `rusthound-ce` zips straight into a running BloodHound CE instance automatically.
 
 ## Dependencies
 
-Needs the usual pentest toolkit on your path:
-- `nmap`
+The script orchestrates the tools you likely already have installed on Kali/Parrot. It expects these commands to be available in your `$PATH`:
+
+- `nmap` & `nc`
 - `netexec` (or `crackmapexec`)
 - `smbclient`
-- `ldapsearch`
-- `impacket` (`impacket-GetNPUsers`, `impacket-GetUserSPNs`)
-- `rusthound` and/or `bloodhound-python`
-- `rusthound-ce` (BloodHound CE collection)
-- `certipy-ad` or `certipy` (ADCS enumeration)
+- `ldapsearch` & `ldapdomaindump`
+- `impacket-*` (`impacket-GetNPUsers`, `impacket-GetUserSPNs`)
+- `rusthound` / `rusthound-ce`
+- `bloodhound-python`
+- `certipy-ad` (or just `certipy`)
 - `hashcat`
-- `ldapdomaindump`
+- `dig` & `curl`
 
-Most of this comes pre-installed on Kali/Parrot.
+## Installation
+
+This is now a proper Python package. You can install it natively so it's globally available anywhere on your system:
+
+```bash
+git clone https://github.com/your-repo/winenum.git
+cd winenum
+pipx install .
+# or if you are upgrading
+pipx install . --force
+```
+
+*Don't want to install it globally? You can still run it via `python -m winenum` or run the `winenum.py` wrapper script.*
 
 ## Usage
 
 ```bash
-# No creds - just see what's open and what allows anonymous access
-python3 winenum.py 10.10.10.100
+# Just raw IP - testing for NULL/Anonymous and generating a target map
+winenum 10.10.10.100
 
-# With creds - skips anonymous tests, goes straight to auth
-python3 winenum.py 10.10.10.100 -u svc_backup -p 'Password123' -d MEGACORP.LOCAL
+# Full send - skip anonymous checks and go straight to credentialed enum
+winenum 10.10.10.100 -u svc_backup -p 'Password123' -d MEGACORP.LOCAL
 
 # Pass the hash
-python3 winenum.py 10.10.10.100 -u administrator -H aad3b435b51404ee:31d6cfe0d16ae931 -d MEGACORP.LOCAL
+winenum 10.10.10.100 -u administrator -H aad3b435b51404ee:31d6cfe0d16ae931 -d MEGACORP.LOCAL
 
-# Custom output dir and more threads
-python3 winenum.py 10.10.10.100 -u user -p pass -d CORP -o ./loot -T 8
-
-# Export to JSON
-python3 winenum.py 10.10.10.100 -u user -p pass --json results.json
+# Automatically upload BloodHound data to your local CE instance
+winenum 10.10.10.100 -u user -p pass -d CORP --bh-uri http://localhost:8080 --bh-user admin --bh-pass Admin123!
 ```
 
 ## Options
@@ -66,64 +65,29 @@ positional arguments:
   target                Target IP address
 
 options:
+  -h, --help            show this help message and exit
   -u, --username        Username for authentication
   -p, --password        Password for authentication
   -d, --domain          Domain name (auto-discovered if not provided)
   -H, --hash            NTLM hash (LM:NT or just NT)
-  -t, --timeout         Command timeout in seconds (default: 15)
   -T, --threads         Number of concurrent threads (default: 5)
   -o, --output          Output directory (default: ./winenum)
   -v, --verbose         Verbose output
-  --json FILE           Export results to JSON
+  --bh-uri BH_URI       BloodHound CE URI (e.g., http://127.0.0.1:8080)
+  --bh-user BH_USER     BloodHound CE Username
+  --bh-pass BH_PASS     BloodHound CE Password
 ```
 
-## Output
+## Caveats and "It Broke" Fixes
 
-Everything gets saved to `./winenum/` by default:
+Because Windows enumeration relies heavily on how your local pentest box is configured via your `$PATH`, things can behave weirdly if paths don't line up.
 
-```
-winenum/
-├── domain_users.txt        # Users found via RID brute
-├── hashes                  # All collected hashes (AS-REP + kerberoast)
-├── asrep_hashes.txt        # AS-REP hashes (hashcat -m 18200)
-├── kerberoast_hashes.txt   # Kerberoast hashes (hashcat -m 13100)
-├── cracked.txt             # Cracked passwords
-├── krb5.conf               # Kerberos config (export KRB5_CONFIG=./winenum/krb5.conf)
-├── zone_transfer.txt       # DNS zone transfer results
-├── ldapdump/               # ldapdomaindump HTML output
-├── bloodhound/             # RustHound / bloodhound-python collection
-├── bloodhound-ce/          # RustHound-CE collection (BloodHound CE)
-└── certipy/                # Certipy ADCS analysis
-```
+- **Hashcat Wordlists**: The script hardcodes the wordlist path to `/usr/share/wordlists/rockyou.txt` (the standard Kali location). If your `rockyou` is somewhere else (like `~/wordlists/rockyou.txt`), the cracking phase will quietly skip itself.
+- **Impacket Paths**: Depending on how you installed Impacket, the scripts might be named `GetNPUsers.py` instead of `impacket-GetNPUsers`. This tool calls the `impacket-` prefixed commands. If your tools are missing the prefix, you'll need to alias them or link them in your path.
+- **Certipy Executables**: Same as above; the script tries both `certipy-ad find` and `certipy find`. If neither are in your global variables, ADCS enumeration will skip.
 
-## How It Runs
-
-Everything runs concurrently in a thread pool — service enumeration, RID brute, kerberoasting, AS-REP roasting, BloodHound collection, and certipy all fire at the same time. Once all tasks finish and hashes are collected, hashcat kicks in to crack them.
-
-You'll see live progress as tasks complete:
-
-```
-[*] Launching 13 tasks concurrently...
-[+] [1/13] http ✓
-[+] [2/13] rdp ✓
-[+] [3/13] kerberos ✓
-[+] [4/13] winrm ✓
-[★] Found 2 Kerberoastable service account(s)!
-[+] [5/13] kerberoast ✓
-[+] [6/13] smb ✓
-[+] [7/13] mssql ✓
-[★] xp_cmdshell is ENABLED!
-[★] Vulnerable templates found: ESC1, ESC8
-[+] [8/13] certipy ✓
-...
-[+] [13/13] bloodhound ✓
-[*] Cracking AS-REP hashes (mode 18200)...
-[*] Cracking Kerberoast hashes (mode 13100)...
-[★] CRACKED: svc_sql:Summer2024!
-```
+If any of these fail, check the `-v` (verbose) flag to see exactly which subprocess command choked and why.
 
 ## Disclaimer
 
-Built for authorised security testing and CTF challenges only. Don't be stupid with it.
-
-This has been built for commands/tools as I use them and if your applicaton/wordlist/etc placement is different those functions will not work and are not my problem.
+Built strictly for authorized security testing, HTB, and CTF environments. Don't throw this at networks you don't own.
