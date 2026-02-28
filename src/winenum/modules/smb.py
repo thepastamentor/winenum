@@ -3,10 +3,12 @@ from winenum.core.result import ServiceResult
 from winenum.core.target import Target
 from winenum.core.runner import run_command
 import re
+import os
 
-def _smb_get_info(target: Target, result: ServiceResult, progress_ui, progress_id):
-    """Get SMB signing and version info"""
-    cmd = ['netexec', 'smb', target.ip]
+def _smb_get_info(target: Target, result: ServiceResult, output_dir: str, progress_ui, progress_id):
+    """Get SMB signing and version info and generate hosts file"""
+    hosts_file = os.path.join(output_dir, f"{target.ip}_hosts.txt")
+    cmd = ['netexec', 'smb', target.ip, '--generate-hosts-file', hosts_file]
     code, stdout, stderr = run_command(cmd)
     
     for line in stdout.split('\n'):
@@ -24,6 +26,12 @@ def _smb_get_info(target: Target, result: ServiceResult, progress_ui, progress_i
                 result.details['os_info'] = match.group(1)
                 if progress_ui:
                     progress_ui.console.print(f"[blue][*][/blue] OS: {match.group(1)}")
+                    
+    if os.path.exists(hosts_file):
+        result.details['hosts_file_generated'] = hosts_file
+        if progress_ui:
+            progress_ui.console.print(f"[green][+][/green] Hosts file generated: {hosts_file}")
+            progress_ui.console.print(f"    [blue]Run:[/blue] cat {hosts_file} | sudo tee -a /etc/hosts")
 
 def _smb_spider_share(target: Target, result: ServiceResult, share: dict, user: str, 
                       password: str, auth_type: str, ntlm_hash: str = None, progress_ui=None):
@@ -237,7 +245,7 @@ def enum_smb(target: Target, open_ports: dict, output_dir: str, progress_id=None
     if progress_ui:
         progress_ui.update(progress_id, description="[yellow]SMB: Getting info...[/yellow]")
         
-    _smb_get_info(target, result, progress_ui, progress_id)
+    _smb_get_info(target, result, output_dir, progress_ui, progress_id)
     
     if target.has_creds():
         if progress_ui:

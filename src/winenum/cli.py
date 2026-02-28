@@ -261,6 +261,9 @@ class Orchestrator:
                 findings.append(f"MSSQL: xp_cmdshell ENABLED (running as {user})")
             if result.details.get('local_auth'):
                 findings.append(f"MSSQL: Local auth works")
+            if result.details.get('hosts_file_generated'):
+                hosts_file = result.details['hosts_file_generated']
+                findings.append(f"DNS: Hosts file generated. Run `cat {hosts_file} | sudo tee -a /etc/hosts`")
             if result.details.get('ldapdump_dir'):
                 findings.append(f"LDAP: Domain dumped to {result.details['ldapdump_dir']}")
                 
