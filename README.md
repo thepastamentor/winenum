@@ -1,4 +1,4 @@
-# WinEnum (Rich Edition)
+# WinEnum
 
 A high-speed, concurrent Windows/AD enumeration tool designed specifically for HackTheBox and CTFs. Feed it an IP (and optionally credentials), and it tears straight through all common services concurrently, extracting information, finding vulnerable cert templates, dumping hashes, and immediately throwing them into hashcat. 
 
@@ -8,10 +8,11 @@ Built to eliminate the boring part of AD environments so you can get straight to
 
 - **Port scan fallback** — Hits common AD ports (SMB, LDAP, Kerberos, WinRM, RDP, MSSQL, DNS, HTTP). Uses Nmap if installed, falls back to Netcat if nmap fails.
 - **Auto-pilot Domain discovery** — Pulls the domain name natively from SMB or LDAP if you forget to provide it.
+- **Hosts File Generation** — Automatically generates an `/etc/hosts` compatible file format from SMB enumeration and gives you a one-liner to add it.
 - **Concurrent Execution** — Smashes out enumeration with a thread pool. No more waiting 5 minutes for `rusthound` before checking if `netexec` allows a NULL session. It all happens at once.
 - **Beautiful UI** — Powered by `rich`, progress bars track every individual service in real-time, popping high-value findings (like `ADMIN ACCESS` or `xp_cmdshell`) directly to the console above the progress bars.
 - **Auto-cracking** — Captures AS-REP and Kerberoast hashes simultaneously, concatenates them, and immediately launches `hashcat` to crack them while you read the summary report.
-- **BloodHound CE API** — Built-in support to upload `rusthound-ce` zips straight into a running BloodHound CE instance automatically.
+- **BloodHound CE API** — Built-in support to upload `rusthound-ce` zips straight into a running BloodHound CE instance automatically (with an option to wipe the DB prior).
 
 ## Dependencies
 
@@ -54,6 +55,9 @@ winenum 10.10.10.100 -u administrator -H aad3b435b51404ee:31d6cfe0d16ae931 -d ME
 
 # Automatically upload BloodHound data to your local CE instance
 winenum 10.10.10.100 -u user -p pass -d CORP --bh-uri http://localhost:8080 --bh-user admin --bh-pass Admin123!
+
+# Wipe the BloodHound CE database before uploading new data
+winenum 10.10.10.100 -u user -p pass -d CORP --bh-uri http://localhost:8080 --bh-user admin --bh-pass Admin123! --bh-clear
 ```
 
 ## Options
@@ -74,6 +78,7 @@ options:
   --bh-uri BH_URI       BloodHound CE URI (e.g., http://127.0.0.1:8080)
   --bh-user BH_USER     BloodHound CE Username
   --bh-pass BH_PASS     BloodHound CE Password
+  --bh-clear            Clear the BloodHound CE database before uploading data
 ```
 
 ## Caveats and "It Broke" Fixes
@@ -88,4 +93,4 @@ If any of these fail, check the `-v` (verbose) flag to see exactly which subproc
 
 ## Disclaimer
 
-Built strictly for authorized security testing, HTB, and CTF environments. Don't throw this at networks you don't own.
+Built strictly for authorised security testing, HTB, and CTF environments. Don't throw this at networks you don't own. I wouldn't recommmend it for learning or for OSCP. You can reach me on the HackTheBox discord as VegeLasagne if you have any feedback etc.
