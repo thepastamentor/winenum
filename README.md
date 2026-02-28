@@ -35,9 +35,7 @@ This is now a proper Python package. You can install it natively so it's globall
 ```bash
 git clone https://github.com/your-repo/winenum.git
 cd winenum
-pipx install .
-# or if you are upgrading
-pipx install . --force
+pip install .
 ```
 
 *Don't want to install it globally? You can still run it via `python -m winenum` or run the `winenum.py` wrapper script.*

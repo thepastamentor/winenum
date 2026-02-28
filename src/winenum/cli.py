@@ -314,6 +314,7 @@ Examples:
     parser.add_argument('--bh-uri', help='BloodHound CE URI (e.g., http://127.0.0.1:8080)')
     parser.add_argument('--bh-user', help='BloodHound CE Username')
     parser.add_argument('--bh-pass', help='BloodHound CE Password')
+    parser.add_argument('--bh-clear', action='store_true', help='Clear the BloodHound CE database before uploading data')
     
     args = parser.parse_args()
     
@@ -322,9 +323,9 @@ Examples:
         
     bh_config = None
     if args.bh_uri and args.bh_user and args.bh_pass:
-        bh_config = {'uri': args.bh_uri, 'user': args.bh_user, 'pass': args.bh_pass}
-    elif args.bh_uri or args.bh_user or args.bh_pass:
-         parser.error("Must specify all --bh-uri, --bh-user, and --bh-pass to upload to BloodHound CE")
+        bh_config = {'uri': args.bh_uri, 'user': args.bh_user, 'pass': args.bh_pass, 'clear': args.bh_clear}
+    elif args.bh_uri or args.bh_user or args.bh_pass or args.bh_clear:
+         parser.error("Must specify all --bh-uri, --bh-user, and --bh-pass to upload to or clear BloodHound CE")
     
     target = Target(
         ip=args.target,

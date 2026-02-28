@@ -9,7 +9,35 @@ from winenum.core.runner import run_command
 # Suppress insecure request warnings if using HTTPS without valid certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def _upload_to_bloodhound_ce(zip_filename: str, bh_uri: str, bh_user: str, bh_pass: str, progress_ui=None, progress_id=None):
+def _clear_bloodhound_db(bh_uri: str, token: str, progress_ui=None, progress_id=None):
+    """Clear BloodHound CE Database"""
+    if progress_ui:
+        progress_ui.update(progress_id, description=f"[yellow]BH CE API: Wiping database...[/yellow]")
+        
+    clear_url = f"{bh_uri.rstrip('/')}/api/v2/clear-database"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "deleteCollectedGraphData": True,
+        "deleteFileIngestHistory": True,
+        "deleteDataQualityHistory": True,
+        "deleteAssetGroupSelectors": []
+    }
+    
+    resp = requests.post(clear_url, headers=headers, json=payload, verify=False, timeout=30)
+    if resp.status_code == 204:
+        if progress_ui:
+            progress_ui.console.print("[magenta bold][★][/magenta bold] BloodHound CE Database wiped successfully!")
+    else:
+        if progress_ui:
+            error_msg = resp.text
+            try: error_msg = str(resp.json())
+            except: pass
+            progress_ui.console.print(f"[red][-][/red] BH CE Database wipe failed (HTTP {resp.status_code}): {error_msg}")
+
+def _upload_to_bloodhound_ce(zip_filename: str, bh_uri: str, bh_user: str, bh_pass: str, bh_clear: bool = False, progress_ui=None, progress_id=None):
     """Upload zip file securely to BloodHound CE"""
     try:
         if progress_ui:
@@ -31,30 +59,63 @@ def _upload_to_bloodhound_ce(zip_filename: str, bh_uri: str, bh_user: str, bh_pa
                 progress_ui.console.print("[red][-][/red] No session token returned from BloodHound CE")
             return
             
-        # 2. Upload the file payload
+        # Optional: Clear DB
+        if bh_clear:
+            _clear_bloodhound_db(bh_uri, token, progress_ui, progress_id)
+            
+        # 2. Start File Upload Job
         if progress_ui:
             progress_ui.update(progress_id, description=f"[yellow]BH CE API: Uploading {os.path.basename(zip_filename)}...[/yellow]")
             
-        upload_url = f"{bh_uri.rstrip('/')}/api/v2/file-upload"
+        start_job_url = f"{bh_uri.rstrip('/')}/api/v2/file-upload/start"
         headers = {"Authorization": f"Bearer {token}"}
         
-        with open(zip_filename, 'rb') as f:
-            files = {'file': (os.path.basename(zip_filename), f, 'application/zip')}
-            up_resp = requests.post(upload_url, headers=headers, files=files, verify=False, timeout=30)
+        job_resp = requests.post(start_job_url, headers=headers, verify=False, timeout=10)
+        if job_resp.status_code != 201:
+            if progress_ui:
+                progress_ui.console.print(f"[red][-][/red] BH CE failed to start upload job (HTTP {job_resp.status_code}): {job_resp.text}")
+            return
             
-            if up_resp.status_code in [200, 201, 202]:
+        job_id = job_resp.json().get('data', {}).get('id')
+        if not job_id:
+            if progress_ui:
+                progress_ui.console.print("[red][-][/red] BH CE did not return a valid Job ID")
+            return
+            
+        # 3. Upload File to Job
+        upload_url = f"{bh_uri.rstrip('/')}/api/v2/file-upload/{job_id}"
+        with open(zip_filename, 'rb') as f:
+            upload_headers = headers.copy()
+            upload_headers['Content-Type'] = 'application/zip'
+            upload_headers['X-File-Upload-Name'] = os.path.basename(zip_filename)
+            
+            up_resp = requests.post(upload_url, headers=upload_headers, data=f, verify=False, timeout=60)
+            
+            if up_resp.status_code not in [200, 202]:
                 if progress_ui:
-                    progress_ui.console.print("[magenta bold][★][/magenta bold] Successfully uploaded to BloodHound CE API!")
-            else:
-                if progress_ui:
-                    progress_ui.console.print(f"[red][-][/red] Upload failed: {up_resp.text}")
+                    error_msg = up_resp.text
+                    try: error_msg = str(up_resp.json())
+                    except: pass
+                    progress_ui.console.print(f"[red][-][/red] BH CE Upload failed (HTTP {up_resp.status_code}) on {upload_url}: {error_msg}")
+                return
+                
+        # 4. End File Upload Job
+        end_job_url = f"{bh_uri.rstrip('/')}/api/v2/file-upload/{job_id}/end"
+        end_resp = requests.post(end_job_url, headers=headers, verify=False, timeout=10)
+        
+        if end_resp.status_code in [200, 202]:
+            if progress_ui:
+                progress_ui.console.print("[magenta bold][★][/magenta bold] Successfully uploaded to BloodHound CE API!")
+        else:
+            if progress_ui:
+                progress_ui.console.print(f"[red][-][/red] BH CE failed to end job (HTTP {end_resp.status_code}) on {end_job_url}")
                 
     except Exception as e:
         if progress_ui:
             progress_ui.console.print(f"[red][-][/red] Error communicating with BloodHound CE API: {e}")
 
 def _collect_rusthound_ce(target: Target, result: ServiceResult, output_dir: str, 
-                          bh_uri: str = None, bh_user: str = None, bh_pass: str = None, 
+                          bh_uri: str = None, bh_user: str = None, bh_pass: str = None, bh_clear: bool = False,
                           progress_ui=None, progress_id=None) -> bool:
     """Collect using rusthound-ce for BloodHound Community Edition"""
     bh_ce_dir = os.path.join(output_dir, 'bloodhound-ce')
@@ -87,7 +148,7 @@ def _collect_rusthound_ce(target: Target, result: ServiceResult, output_dir: str
             
             # --- Auto Upload to BloodHound CE ---
             if bh_uri and bh_user and bh_pass:
-                _upload_to_bloodhound_ce(zip_path, bh_uri, bh_user, bh_pass, progress_ui, progress_id)
+                _upload_to_bloodhound_ce(zip_path, bh_uri, bh_user, bh_pass, bh_clear, progress_ui, progress_id)
                 
             return True
             
@@ -196,9 +257,10 @@ def collect_bloodhound(target: Target, open_ports: dict, output_dir: str,
     bh_uri = bh_config.get('uri') if bh_config else None
     bh_user = bh_config.get('user') if bh_config else None
     bh_pass = bh_config.get('pass') if bh_config else None
+    bh_clear = bh_config.get('clear', False) if bh_config else False
 
     # Run rusthound-ce (BloodHound CE) 
-    _collect_rusthound_ce(target, result, output_dir, bh_uri, bh_user, bh_pass, progress_ui, progress_id)
+    _collect_rusthound_ce(target, result, output_dir, bh_uri, bh_user, bh_pass, bh_clear, progress_ui, progress_id)
     
     if progress_ui:
         progress_ui.update(progress_id, description="[green]BloodHound: Complete ✓[/green]", completed=100)
